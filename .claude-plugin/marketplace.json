@@ -1,0 +1,14 @@
+{
+  "name": "claude-memrotate-plugin",
+  "description": "memrotate: rotacion de memoria para Claude Code, al estilo logrotate.",
+  "owner": {
+    "name": "Hanoi Fragata Rodriguez"
+  },
+  "plugins": [
+    {
+      "name": "memrotate",
+      "source": "./plugins/memrotate",
+      "description": "Memoria del proyecto con rotacion: fichero vigente con los ultimos N dias, entradas fijadas que nunca rotan, salvas mensuales comprimidas consultables y recordatorio de guardado."
+    }
+  ]
+}

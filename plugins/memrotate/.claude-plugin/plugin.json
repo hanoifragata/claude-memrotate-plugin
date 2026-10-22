@@ -1,0 +1,41 @@
+{
+  "name": "memrotate",
+  "displayName": "memrotate",
+  "version": "0.5.1",
+  "description": "Rota la memoria del proyecto: un fichero vigente con los ultimos N dias, entradas fijadas que nunca rotan y salvas mensuales comprimidas (.md.gz) que Claude consulta cuando hace falta. Recuerda a Claude guardar lo aprendido y, opcionalmente, archiva transcripts.",
+  "author": {
+    "name": "Hanoi Fragata Rodriguez"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "rotation",
+    "archive",
+    "agent-teams",
+    "logrotate"
+  ],
+  "userConfig": {
+    "retention_days": {
+      "type": "number",
+      "title": "Dias de retencion",
+      "description": "Dias que se mantienen en el fichero de memoria vigente. Lo anterior se mueve a salvas mensuales comprimidas. Cada proyecto puede sobrescribirlo con /memrotate:rotate days N.",
+      "default": 30,
+      "min": 1,
+      "max": 3650
+    },
+    "archive_transcripts": {
+      "type": "boolean",
+      "title": "Archivar transcripts",
+      "description": "Comprime en la carpeta de salvas los transcripts de sesiones mas antiguos que la retencion, en lugar de dejar que Claude Code los borre. Requiere cleanupPeriodDays mayor que la retencion.",
+      "default": false
+    },
+    "save_reminder": {
+      "type": "boolean",
+      "title": "Recordatorio de guardado",
+      "description": "Si Claude trabaja un rato (15 herramientas por defecto) sin actualizar la memoria, al terminar el turno se le pide que guarde lo aprendido. Cada proyecto puede cambiarlo con /memrotate:rotate reminder on|off.",
+      "default": true
+    }
+  },
+  "homepage": "https://github.com/hanoifragata/claude-memrotate-plugin/tree/main/plugins/memrotate",
+  "repository": "https://github.com/hanoifragata/claude-memrotate-plugin"
+}

@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" -Mode auto\nif ([Console]::IsInputRedirected) { $env:MEMROTATE_HOOK_INPUT = [Console]::In.ReadToEnd() }; powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/rotate.ps1\" -Mode auto",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" -Mode stop\nif ([Console]::IsInputRedirected) { $env:MEMROTATE_HOOK_INPUT = [Console]::In.ReadToEnd() }; powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/rotate.ps1\" -Mode stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

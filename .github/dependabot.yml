@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Propone actualizar las acciones fijadas por SHA en .github/workflows
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # No proponer versiones con menos de 14 dias publicadas
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: ci
