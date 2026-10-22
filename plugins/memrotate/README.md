@@ -113,7 +113,7 @@ Hay dos niveles. **El del proyecto tiene prioridad sobre el global.**
 
 ### 1. Por proyecto: `.claude/memrotate.json`
 
-Lo escriben `days N`, `transcripts on|off`, `reminder on|off` y `reminder every N`, pero también se puede editar a mano:
+Lo escriben `days N`, `transcripts on|off`, `reminder on|off`, `reminder every N` y los comandos `backup git|folder|every|daily|off`, pero también se puede editar a mano:
 
 ```json
 {
@@ -183,15 +183,27 @@ Para no perder la memoria si le pasa algo al ordenador. Copia **el fichero vigen
 
 **A. Repo privado de GitHub** (con historial de cada cambio):
 ```powershell
-gh repo create claude-memory-backup --private --clone   # o créalo en la web y haz git clone
+cd C:\Datos
+gh repo create claude-memory-backup --private --clone
+```
+Si lo creaste de otra forma (en la web, o con `git init`), asegúrate de que la rama está **vinculada al remoto**; si no, memrotate hace los commits pero no puede subirlos:
+```powershell
+cd C:\Datos\claude-memory-backup
+git push -u origin main     # o master: mira el nombre con  git branch --show-current
 ```
 Después, en `/config` → opciones de memrotate → **Copia: repo git local**, pon la ruta del clon, por ejemplo `C:\Datos\claude-memory-backup`. Usa tu git y tus credenciales habituales: memrotate hace `pull`, `commit` y `push`.
+
+> **Remoto por SSH** (`git@github.com:...`): las copias automáticas se hacen sin terminal, así que no pueden pedirte la contraseña de la clave. Si tu clave tiene contraseña, cárgala en el agente SSH (en Windows: `Start-Service ssh-agent` y `ssh-add`, con el servicio en arranque automático). Con HTTPS y el gestor de credenciales de Git no hace falta nada.
 
 > El repo tiene que ser **privado**: la memoria puede contener nombres de servidores, decisiones internas o datos de clientes.
 
 **B. Carpeta de Google Drive** (también OneDrive o Dropbox): instala Google Drive para escritorio y, en `/config` → **Copia: carpeta**, pon por ejemplo `G:\Mi unidad\claude-memory`. memrotate copia ahí y Drive lo sube solo.
 
-Puedes usar las dos a la vez. Comprueba que funciona con `/memrotate:rotate backup` y `/memrotate:rotate doctor`.
+Puedes usar las dos a la vez.
+
+**Comprueba que funciona** abriendo Claude Code **en tu proyecto** (no en el repo de copia) y ejecutando `/memrotate:rotate backup` y `/memrotate:rotate doctor`. La copia a git debe decir `committed and pushed` (o `up to date` si ya se había copiado), y `doctor` no debe mostrar avisos de backup.
+
+> El repo o la carpeta de copia son solo el **destino**: no abras Claude Code ni ejecutes `/memrotate:rotate` dentro de ellos.
 
 ### Cuándo se copia
 
@@ -261,6 +273,7 @@ Si el proyecto tiene `.gitignore`, se le añaden `.state.json`, `.backup.json` y
 | Windows bloquea el script | `Get-ChildItem C:\ruta\claude-memrotate-plugin -Recurse \| Unblock-File`. El plugin ya usa `-ExecutionPolicy Bypass`, así que normalmente no hace falta. |
 | El hook no parece ejecutarse | Mira la pestaña Errors de `/plugin` o arranca con `claude --debug`. |
 | Linux/macOS: `python3 (>= 3.6) or PowerShell (pwsh) is required` | Instala `python3` (`sudo apt install python3`, `sudo dnf install python3`, o `xcode-select --install` en macOS). El plugin no rompe la sesión mientras tanto, simplemente no rota. |
+| `doctor`: `the branch has no remote, copies stay on this computer` | La rama del repo de copia no está vinculada a GitHub. En el repo de copia: `git push -u origin <rama>` (`git branch --show-current` te dice si es `main` o `master`). |
 | La copia a git dice `push failed` | El commit está hecho en local. Revisa que puedes hacer `git push` a mano en el clon de copia (credenciales, rama con remoto). La próxima copia lo reintenta. |
 | `restore` no encuentra la copia | Comprueba que el destino es el mismo que en el otro PC y que el clon está actualizado (`git pull`). Usa `restore <clave>` con una de las claves que lista. |
 | El recordatorio salta demasiado | `/memrotate:rotate reminder every 30` o `reminder off`. |

@@ -270,6 +270,8 @@ def commits(bare):
 def backup_scenario(cmd, base):
     """Copia a git (clon de un repo 'remoto' local) y a carpeta; restauracion en otra ruta."""
     log = []
+    # Ruta real: en macOS /var es un enlace a /private/var y en Windows TEMP usa nombres cortos (RUNNER~1)
+    base = os.path.realpath(base)
     bare, clone, drive = os.path.join(base, 'remote.git'), os.path.join(base, 'clone'), os.path.join(base, 'drive')
     home = os.path.join(base, 'home')
     git('init', '-q', '--bare', bare)
@@ -403,7 +405,7 @@ def test_hooks():
     py = [sys.executable, os.path.join(SCRIPTS, 'rotate.py')]
     for name, shell in shells:
         before = len(FAILURES)
-        root = tempfile.mkdtemp(prefix='memrotate-hook-')
+        root = os.path.realpath(tempfile.mkdtemp(prefix='memrotate-hook-'))
         try:
             run(py, ['-Mode', 'init', '-ProjectDir', root])
             write(os.path.join(root, 'notes', 'MEMORY-current.md'),
