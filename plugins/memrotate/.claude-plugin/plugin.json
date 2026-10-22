@@ -1,8 +1,8 @@
 {
   "name": "memrotate",
   "displayName": "memrotate",
-  "version": "0.5.1",
-  "description": "Rota la memoria del proyecto: un fichero vigente con los ultimos N dias, entradas fijadas que nunca rotan y salvas mensuales comprimidas (.md.gz) que Claude consulta cuando hace falta. Recuerda a Claude guardar lo aprendido y, opcionalmente, archiva transcripts.",
+  "version": "0.6.0",
+  "description": "Rota la memoria del proyecto como logrotate: fichero vigente con los ultimos N dias, entradas fijadas que nunca rotan, salvas mensuales comprimidas consultables, recordatorio de guardado y copia de seguridad a un repo privado de GitHub o a Google Drive.",
   "author": {
     "name": "Hanoi Fragata Rodriguez"
   },
@@ -34,6 +34,26 @@
       "title": "Recordatorio de guardado",
       "description": "Si Claude trabaja un rato (15 herramientas por defecto) sin actualizar la memoria, al terminar el turno se le pide que guarde lo aprendido. Cada proyecto puede cambiarlo con /memrotate:rotate reminder on|off.",
       "default": true
+    },
+    "backup_git": {
+      "type": "directory",
+      "title": "Copia: repo git local",
+      "description": "Clon local de un repo PRIVADO (por ejemplo claude-memory-backup). memrotate copia ahi la memoria de cada proyecto, hace commit y push. Vacio = desactivado.",
+      "required": false
+    },
+    "backup_dir": {
+      "type": "directory",
+      "title": "Copia: carpeta (Google Drive...)",
+      "description": "Carpeta sincronizada por Google Drive para escritorio, OneDrive o Dropbox (por ejemplo G:\\Mi unidad\\claude-memory). Vacio = desactivado.",
+      "required": false
+    },
+    "backup_interval_hours": {
+      "type": "number",
+      "title": "Copia: intervalo en horas",
+      "description": "0 = en cada sesion con cambios. 24 = una vez al dia como maximo. Las copias manuales (/memrotate:rotate backup) no esperan.",
+      "default": 0,
+      "min": 0,
+      "max": 720
     }
   },
   "homepage": "https://github.com/hanoifragata/claude-memrotate-plugin/tree/main/plugins/memrotate",

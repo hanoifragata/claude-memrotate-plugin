@@ -14,6 +14,7 @@ Solo usa la biblioteca estandar.
 """
 import datetime as dt
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -247,13 +248,137 @@ def behaviour(t, label):
           '%s: la salva contiene la continuacion y la entrada fusionada' % label)
 
 
+# ---------------------------------------------------------------- copia de seguridad
+
+def project_key(root):
+    norm = root.replace('\\', '/').rstrip('/').lower()
+    name = re.sub(r'[^A-Za-z0-9._-]', '-', os.path.basename(root.replace('\\', '/').rstrip('/'))) or 'project'
+    return '%s-%s' % (name, hashlib.sha1(norm.encode('utf-8')).hexdigest()[:8])
+
+
+def git(*args, cwd=None):
+    p = subprocess.run(['git'] + list(args), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if p.returncode != 0:
+        raise RuntimeError('git %s: %s' % (' '.join(args), p.stdout.decode(errors='replace')))
+    return p.stdout.decode().strip()
+
+
+def commits(bare):
+    return int(git('--git-dir', bare, 'rev-list', '--count', 'HEAD'))
+
+
+def backup_scenario(cmd, base):
+    """Copia a git (clon de un repo 'remoto' local) y a carpeta; restauracion en otra ruta."""
+    log = []
+    bare, clone, drive = os.path.join(base, 'remote.git'), os.path.join(base, 'clone'), os.path.join(base, 'drive')
+    home = os.path.join(base, 'home')
+    git('init', '-q', '--bare', bare)
+    git('clone', '-q', bare, clone)
+    git('config', 'user.name', 'memrotate-test', cwd=clone)
+    git('config', 'user.email', 'test@example.com', cwd=clone)
+    git('commit', '-q', '--allow-empty', '-m', 'init', cwd=clone)
+    git('push', '-q', '-u', 'origin', 'HEAD', cwd=clone)
+    os.makedirs(drive)
+    proj = os.path.realpath(os.path.join(base, 'pc1', 'myrepo'))
+    newpc = os.path.realpath(os.path.join(base, 'pc2', 'myrepo'))
+    os.makedirs(proj)
+    os.makedirs(newpc)
+    am = os.path.join(home, 'projects', re.sub(r'[^A-Za-z0-9]', '-', proj), 'memory')
+    write(os.path.join(am, 'MEMORY.md'), '- nota de auto memory\n')
+    write(os.path.join(am, 'temas', 'infra.md'), 'infra\n')
+    env = {'CLAUDE_CONFIG_DIR': home}
+    counts = {}
+
+    def step(name, args, root):
+        code, out, err = run(cmd, args + ['-ProjectDir', root], env=env)
+        log.append('## %s [exit %d]\n%s%s' % (name, code, out, ('STDERR: ' + err.strip() + '\n') if err.strip() else ''))
+
+    step('backup sin destino', ['-Mode', 'backup'], proj)
+    step('init', ['-Mode', 'init'], proj)
+    with open(os.path.join(proj, 'notes', 'MEMORY-current.md'), 'a', encoding='utf-8', newline='\n') as f:
+        f.write('- [%s] antigua\n- [%s] [pin] fijada\n- [%s] reciente\n' % (OLD2, OLD1, RECENT))
+    step('now', ['-Mode', 'now'], proj)
+    step('set destinos', ['-Mode', 'set', '-BackupGit', clone, '-BackupDir', drive, '-BackupEvery', '0'], proj)
+    step('backup', ['-Mode', 'backup'], proj)
+    counts['tras backup'] = commits(bare)
+    step('backup sin cambios', ['-Mode', 'backup'], proj)
+    step('backup quiet sin cambios', ['-Mode', 'backup', '-Quiet'], proj)
+    counts['tras sin cambios'] = commits(bare)
+    mem = os.path.join(proj, 'notes', 'MEMORY-current.md')
+    with open(mem, 'a', encoding='utf-8', newline='\n') as f:
+        f.write('- [%s] cambio 1\n' % TODAY)
+    step('backup quiet con cambios', ['-Mode', 'backup', '-Quiet'], proj)
+    counts['tras cambio'] = commits(bare)
+    step('intervalo 24h', ['-Mode', 'set', '-BackupEvery', '24'], proj)
+    with open(mem, 'a', encoding='utf-8', newline='\n') as f:
+        f.write('- [%s] cambio 2\n' % TODAY)
+    step('backup quiet dentro del intervalo', ['-Mode', 'backup', '-Quiet'], proj)
+    counts['dentro del intervalo'] = commits(bare)
+    step('backup manual ignora el intervalo', ['-Mode', 'backup'], proj)
+    counts['manual'] = commits(bare)
+    step('status', ['-Mode', 'status'], proj)
+    step('doctor', ['-Mode', 'doctor'], proj)
+
+    # PC nuevo: otra ruta, misma configuracion de copia
+    write(os.path.join(newpc, '.claude', 'memrotate.json'), json.dumps({'backupGit': clone, 'backupDir': drive}) + '\n')
+    step('restore en pc nuevo', ['-Mode', 'restore'], newpc)
+    step('restore repetido', ['-Mode', 'restore'], newpc)
+    step('restore clave inexistente', ['-Mode', 'restore', '-From', 'nada-00000000'], newpc)
+    step('backup destino roto', ['-Mode', 'set', '-BackupDir', os.path.join(base, 'no-existe')], proj)
+    step('backup con carpeta inexistente', ['-Mode', 'backup'], proj)
+
+    files = ['## FICHEROS']
+    for top in (os.path.join(clone, project_key(proj)), os.path.join(drive, project_key(proj))):
+        rels = []
+        for b, _, names in os.walk(top):
+            rels += [os.path.relpath(os.path.join(b, n), top).replace('\\', '/') for n in names]
+        files.append('%s: %s' % (os.path.basename(os.path.dirname(top)), ' '.join(sorted(rels))))
+    files.append('pc2 notas: ' + ' '.join(sorted(os.listdir(os.path.join(newpc, 'notes', 'archive')))))
+    files.append('pc2 auto memory: ' + read(os.path.join(home, 'projects', re.sub(r'[^A-Za-z0-9]', '-', newpc), 'memory', 'temas', 'infra.md')).strip())
+    files.append('pc2 vigente:\n' + read(os.path.join(newpc, 'notes', 'MEMORY-current.md')))
+    log.append('\n'.join(files))
+    text = '\n'.join(log)
+    for k, v in ((project_key(proj), 'KEY1'), (project_key(newpc), 'KEY2')):
+        text = text.replace(k, v)
+    text = text.replace(socket_host(), 'HOST')
+    return normalize(text, os.path.realpath(base)), counts
+
+
+def socket_host():
+    import socket
+    return socket.gethostname()
+
+
+def backup_behaviour(t, counts, label):
+    def has(x, msg):
+        check(x in t, '%s backup: %s' % (label, msg))
+    has('backup: no destination configured', 'avisa si no hay destino')
+    has('[ok]   git ROOT/clone: committed and pushed', 'primera copia a git: commit y push')
+    has('[ok]   folder ROOT/drive: 5 files updated', 'primera copia a carpeta: 5 ficheros (vigente, salva, indice y 2 de auto memory)')
+    has('[ok]   git ROOT/clone: up to date', 'sin cambios: git al dia')
+    check(re.search(r'## backup quiet sin cambios \[exit 0\]\n\n', t) is not None, '%s backup: -Quiet no imprime nada' % label)
+    check(counts == {'tras backup': 2, 'tras sin cambios': 2, 'tras cambio': 3, 'dentro del intervalo': 3, 'manual': 4},
+          '%s backup: commits en el remoto %r' % (label, counts))
+    has('every 24 h (last DATETIME)', 'status muestra el intervalo')
+    has('[ok]   last backup DATETIME', 'doctor muestra la ultima copia')
+    has('restore from git ROOT/clone: KEY1 (backup of DATETIME from HOST)', 'restore encuentra la copia aunque cambie la ruta')
+    for r in ('+ auto-memory/MEMORY.md', '+ auto-memory/temas/infra.md', '+ memrotate/MEMORY-current.md',
+              '+ memrotate/archive/INDEX.md', '+ CLAUDE.md block'):
+        has(r, 'restore recupera %s' % r[2:])
+    has('nothing to restore: everything is already here', 'restore repetido no hace nada')
+    has('available backups (use /memrotate:rotate restore <key>):', 'restore con clave inexistente lista las copias')
+    has('[fail] folder ROOT/no-existe: folder does not exist', 'carpeta inexistente da error claro')
+    has('pc2 auto memory: infra', 'auto memory restaurada en la ruta nueva')
+    has('[pin] fijada', 'vigente restaurado')
+
+
 # ---------------------------------------------------------------- hooks reales
 
 def hook_commands():
     with open(os.path.join(PLUGIN, 'hooks', 'hooks.json'), encoding='utf-8') as f:
         h = json.load(f)['hooks']
     root = PLUGIN.replace('\\', '/')
-    return {ev: h[ev][0]['hooks'][0]['command'].replace('${CLAUDE_PLUGIN_ROOT}', root) for ev in ('SessionStart', 'Stop')}
+    return {ev: h[ev][0]['hooks'][0]['command'].replace('${CLAUDE_PLUGIN_ROOT}', root) for ev in ('SessionStart', 'Stop', 'SessionEnd')}
 
 
 def git_bash():
@@ -295,6 +420,14 @@ def test_hooks():
             code, out, err = run(shell, [cmds['Stop']], stdin=payload, env=env)
             check(code == 0, 'hook Stop en %s: exit %d (%s)' % (name, code, err.strip()[:200]))
             check('"decision":"block"' in out, 'hook Stop en %s: recibe stdin y avisa (%r)' % (name, out[:200]))
+            drive = os.path.join(root, '_drive')
+            os.makedirs(drive)
+            write(os.path.join(root, '.claude', 'memrotate.json'), json.dumps({'backupDir': drive}) + '\n')
+            code, out, err = run(shell, [cmds['SessionEnd']], stdin='{"reason":"exit"}', env=env)
+            check(code == 0 and out.strip() == '', 'hook SessionEnd en %s: silencioso (exit %d, %r, %s)' % (name, code, out[:120], err.strip()[:200]))
+            check(os.path.isfile(os.path.join(drive, project_key(os.path.realpath(root)), 'memrotate', 'MEMORY-current.md'))
+                  or os.path.isfile(os.path.join(drive, project_key(root), 'memrotate', 'MEMORY-current.md')),
+                  'hook SessionEnd en %s: copia la memoria a la carpeta' % name)
             print('  hooks en %s: %s' % (name, 'ok' if len(FAILURES) == before else 'FALLA'))
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -336,7 +469,7 @@ def test_manifests():
 def main():
     print('memrotate tests - %s, Python %s' % (sys.platform, sys.version.split()[0]))
     test_manifests()
-    results = {}
+    results, backups = {}, {}
     for label, cmd in implementations():
         root = tempfile.mkdtemp(prefix='memrotate-%s-' % label)
         try:
@@ -346,6 +479,16 @@ def main():
         before = len(FAILURES)
         behaviour(results[label], label)
         print('  %-5s comportamiento: %s' % (label, 'ok' if len(FAILURES) == before else 'FALLA'))
+        if shutil.which('git'):
+            base = tempfile.mkdtemp(prefix='memrotate-bk-%s-' % label)
+            try:
+                text, counts = backup_scenario(cmd, base)
+            finally:
+                shutil.rmtree(base, ignore_errors=True)
+            before = len(FAILURES)
+            backup_behaviour(text, counts, label)
+            backups[label] = text
+            print('  %-5s copia de seguridad: %s' % (label, 'ok' if len(FAILURES) == before else 'FALLA'))
     labels = list(results)
     for other in labels[1:]:
         same = results[labels[0]] == results[other]
@@ -355,6 +498,16 @@ def main():
             import difflib
             for line in list(difflib.unified_diff(results[labels[0]].splitlines(), results[other].splitlines(),
                                                   labels[0], other, lineterm='', n=1))[:60]:
+                print('    ' + line)
+    for other in list(backups)[1:]:
+        first = list(backups)[0]
+        same = backups[first] == backups[other]
+        check(same, 'paridad backup %s vs %s' % (first, other))
+        print('  paridad backup %s vs %s: %s' % (first, other, 'identica' if same else 'DIFERENTE'))
+        if not same:
+            import difflib
+            for line in list(difflib.unified_diff(backups[first].splitlines(), backups[other].splitlines(),
+                                                  first, other, lineterm='', n=1))[:60]:
                 print('    ' + line)
     if len(labels) == 1:
         print('  aviso: no hay PowerShell, solo se prueba rotate.py')

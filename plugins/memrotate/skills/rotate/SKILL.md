@@ -1,7 +1,7 @@
 ---
 name: rotate
-description: Configura y ejecuta la rotacion de memoria del proyecto (fichero vigente con los ultimos N dias + salvas mensuales comprimidas). Usala cuando el usuario escriba /memrotate:rotate o pida inicializar la memoria rotada, rotar ahora, cambiar los dias de retencion, activar el archivado de transcripts o ver el estado.
-argument-hint: "[init [dias] | now | status | days N | transcripts on|off | reminder on|off | reminder every N | list | doctor]"
+description: Configura y ejecuta la rotacion de memoria del proyecto (fichero vigente con los ultimos N dias + salvas mensuales comprimidas) y su copia de seguridad en GitHub o Google Drive. Usala cuando el usuario escriba /memrotate:rotate o pida inicializar la memoria rotada, rotar ahora, cambiar los dias de retencion, activar el archivado de transcripts, ver el estado, hacer o configurar la copia de seguridad o restaurar la memoria.
+argument-hint: "[init [dias] | now | status | days N | transcripts on|off | reminder on|off | reminder every N | list | doctor | backup [git <ruta> | folder <ruta> | every N | daily | off] | restore [clave]]"
 disable-model-invocation: true
 ---
 
@@ -42,6 +42,14 @@ powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '${CLAUDE_PL
 | `reminder every N` | `-Mode set -ReminderTools N` |
 | `list` | `-Mode list` |
 | `doctor` | `-Mode doctor` |
+| `backup` | `-Mode backup` (copia ahora a todos los destinos configurados) |
+| `backup git <ruta>` | `-Mode set -BackupGit '<ruta>'` (clon local de un repo privado) |
+| `backup folder <ruta>` | `-Mode set -BackupDir '<ruta>'` (carpeta de Google Drive, OneDrive, Dropbox...) |
+| `backup every N` | `-Mode set -BackupEvery N` (horas; 0 = en cada sesion con cambios) |
+| `backup daily` | `-Mode set -BackupEvery 24` |
+| `backup off` | `-Mode set -BackupGit off -BackupDir off` |
+| `restore` | `-Mode restore` |
+| `restore <clave>` | `-Mode restore -From '<clave>'` |
 
 Si no hay argumentos, ejecuta primero `-Mode status` y despues pregunta al usuario con AskUserQuestion que quiere hacer, con estas opciones:
 
@@ -49,8 +57,14 @@ Si no hay argumentos, ejecuta primero `-Mode status` y despues pregunta al usuar
 2. **Cambiar dias de retencion**: pregunta el numero y ejecuta `-Mode set -Days N`
 3. **Ver salvas archivadas**: `-Mode list`
 4. **Inicializar en este proyecto**: `-Mode init`. Ofrecela solo si el estado dice que no esta inicializado; en ese caso ponla la primera.
+5. **Copia de seguridad**: si ya hay destino, `-Mode backup`; si no, ayuda a configurarla (ver abajo).
 
 Si `status` o cualquier comando muestra algo raro, sugiere `doctor`. Para guardar una entrada, el comando es `/memrotate:remember` (otra skill del plugin).
+
+Copia de seguridad:
+- Si el usuario pide configurarla sin dar rutas, explicale las dos opciones (repo privado clonado en local y/o carpeta de Google Drive para escritorio) y preguntale las rutas. Recuerda que el repo debe ser **privado**: la memoria puede contener datos internos.
+- Tras configurar un destino, ejecuta `-Mode backup` para hacer la primera copia y muestra el resultado.
+- Despues de `restore`, si el script lista copias disponibles, pregunta cual restaurar y repite con `-From`.
 
 Para activar o desactivar el archivado de transcripts o el recordatorio de guardado, el usuario puede escribir "Other" o usar `transcripts on|off` / `reminder on|off`.
 

@@ -8,6 +8,7 @@ Rotación de memoria para Claude Code, al estilo `logrotate`:
 - **Índice** (`notes/archive/INDEX.md`): lista cada salva con su rango de fechas y su número de entradas.
 - **Transcripts (opcional)**: en lugar de dejar que `cleanupPeriodDays` los borre, comprime los `.jsonl` antiguos en `notes/archive/transcripts-AAAA-MM.zip`.
 - **Recordatorio de guardado**: si Claude trabaja un rato sin apuntar nada, le pide que guarde lo aprendido.
+- **Copia de seguridad**: sube la memoria (vigente, salvas y Auto Memory de Claude Code) a un repo privado de GitHub y/o a Google Drive, y la recupera en otro PC con `restore`.
 
 ## Instalación
 
@@ -52,11 +53,12 @@ No hay que hacer nada más: la rotación se ejecuta sola al abrir sesión.
 | Pieza | Qué hace |
 |---|---|
 | Hook `SessionStart` | Rota como máximo una vez al día y le dice a Claude dónde están el vigente y las salvas. Después de cada compactación, le recuerda guardar lo duradero del resumen. En proyectos sin inicializar no hace nada. |
+| Hooks `SessionEnd` y `SessionStart` (en segundo plano) | Copia de seguridad automática si hay destino configurado y algo cambió, respetando el intervalo. No ralentiza el arranque. |
 | Hook `Stop` | Recordatorio de guardado: si Claude lleva 15 herramientas sin actualizar la memoria, al terminar el turno le pide que guarde lo aprendido. |
 | `/memrotate:rotate` | Menú para inicializar, rotar ya, cambiar los días, activar transcripts o el recordatorio, ver salvas o diagnosticar. |
 | `/memrotate:remember` | Guarda una entrada con la fecha de hoy. Claude también la usa sola cuando le pides "apunta que...". |
 | Skill `memrotate:archive` | Claude la usa sola cuando lo que buscas no está en el vigente: busca y lee en las salvas `.gz` sin descomprimirlas a disco. |
-| `/config` | Opciones globales: `retention_days` (30 por defecto), `archive_transcripts` y `save_reminder`. |
+| `/config` | Opciones globales: `retention_days` (30 por defecto), `archive_transcripts`, `save_reminder` y los destinos e intervalo de la copia de seguridad. |
 
 ## Formato de las entradas
 
@@ -95,6 +97,12 @@ Las líneas sin fecha y sin `[pin]` (títulos, comentarios) también se quedan s
 | `/memrotate:rotate reminder on\|off` | Activa o desactiva el recordatorio de guardado en este proyecto |
 | `/memrotate:rotate reminder every N` | Cada cuántas herramientas sin guardar salta el recordatorio |
 | `/memrotate:rotate list` | Muestra el índice de salvas |
+| `/memrotate:rotate backup` | Copia ahora a todos los destinos configurados |
+| `/memrotate:rotate backup git <ruta>` | Destino: clon local de un repo **privado** (solo este proyecto; para todos, usa `/config`) |
+| `/memrotate:rotate backup folder <ruta>` | Destino: carpeta de Google Drive, OneDrive o Dropbox |
+| `/memrotate:rotate backup every N` / `backup daily` | Intervalo: como mucho una copia cada N horas (`daily` = 24). 0 = en cada sesión con cambios |
+| `/memrotate:rotate backup off` | Desactiva la copia en este proyecto |
+| `/memrotate:rotate restore [clave]` | Recupera la memoria desde la copia (PC nuevo, disco cambiado...) |
 | `/memrotate:rotate doctor` | Diagnóstico: intérprete, bloque de `CLAUDE.md`, hooks funcionando, tamaño del vigente, entradas sin fecha, `.gitignore`, transcripts |
 
 Para consultar lo archivado no hace falta ningún comando. Pregúntale a Claude ("¿qué decidimos sobre X en agosto?") y usará la skill `memrotate:archive`.
@@ -113,6 +121,9 @@ Lo escriben `days N`, `transcripts on|off`, `reminder on|off` y `reminder every 
   "archiveTranscripts": false,
   "saveReminder": true,
   "reminderEveryTools": 15,
+  "backupGit": "C:/Datos/claude-memory-backup",
+  "backupDir": "",
+  "backupIntervalHours": 24,
   "memoryFile": "notes/MEMORY-current.md",
   "archiveDir": "notes/archive"
 }
@@ -124,6 +135,9 @@ Lo escriben `days N`, `transcripts on|off`, `reminder on|off` y `reminder every 
 | `archiveTranscripts` | `false` | Comprimir los transcripts antiguos en vez de dejar que se borren |
 | `saveReminder` | `true` | Recordar a Claude que guarde lo aprendido |
 | `reminderEveryTools` | `15` | Herramientas sin tocar la memoria antes de recordárselo |
+| `backupGit` | vacío | Clon local del repo privado de copia. `off` lo desactiva aunque esté en `/config` |
+| `backupDir` | vacío | Carpeta de copia (Google Drive, OneDrive...). `off` lo desactiva |
+| `backupIntervalHours` | `0` | Horas mínimas entre copias automáticas. 0 = en cada sesión con cambios |
 | `memoryFile` | `notes/MEMORY-current.md` | Fichero vigente, relativo a la raíz del proyecto |
 | `archiveDir` | `notes/archive` | Carpeta de salvas e índice |
 
@@ -161,6 +175,53 @@ Claude Code borra al arrancar los transcripts con más días que `cleanupPeriodD
 
 `/memrotate:rotate status` te avisa si el valor es demasiado bajo.
 
+## Copia de seguridad
+
+Para no perder la memoria si le pasa algo al ordenador. Copia **el fichero vigente, todas las salvas, el índice y la Auto Memory de Claude Code** de cada proyecto. Nunca copia credenciales ni transcripts.
+
+### Configurarla (una vez)
+
+**A. Repo privado de GitHub** (con historial de cada cambio):
+```powershell
+gh repo create claude-memory-backup --private --clone   # o créalo en la web y haz git clone
+```
+Después, en `/config` → opciones de memrotate → **Copia: repo git local**, pon la ruta del clon, por ejemplo `C:\Datos\claude-memory-backup`. Usa tu git y tus credenciales habituales: memrotate hace `pull`, `commit` y `push`.
+
+> El repo tiene que ser **privado**: la memoria puede contener nombres de servidores, decisiones internas o datos de clientes.
+
+**B. Carpeta de Google Drive** (también OneDrive o Dropbox): instala Google Drive para escritorio y, en `/config` → **Copia: carpeta**, pon por ejemplo `G:\Mi unidad\claude-memory`. memrotate copia ahí y Drive lo sube solo.
+
+Puedes usar las dos a la vez. Comprueba que funciona con `/memrotate:rotate backup` y `/memrotate:rotate doctor`.
+
+### Cuándo se copia
+
+- **Automáticamente** al cerrar cada sesión, y al abrir la siguiente en segundo plano (por si la anterior se cerró de golpe). Solo si algo cambió desde la última copia.
+- **Intervalo** (`backup every N`, `backup daily` o la opción **Copia: intervalo en horas** de `/config`): con 24, como mucho una copia al día aunque haya cambios. Con 0 (por defecto), en cada sesión con cambios.
+- **Manualmente** con `/memrotate:rotate backup`, que no espera al intervalo.
+
+La memoria solo cambia mientras trabajas con Claude, así que no hace falta un proceso aparte con el PC apagado o sin sesiones.
+
+### Qué hay en la copia
+
+```
+claude-memory-backup/
+└─ myrepo-1a2b3c4d/           ← nombre del proyecto + huella de su ruta
+   ├─ backup.json             ← proyecto, equipo y fecha de la copia
+   ├─ memrotate/
+   │  ├─ MEMORY-current.md
+   │  └─ archive/ (INDEX.md, MEMORY-AAAA-MM.md.gz...)
+   └─ auto-memory/            ← ~/.claude/projects/<proyecto>/memory
+```
+
+La copia **nunca borra** nada en el destino: si algo desaparece en tu PC, sigue en la copia.
+
+### Recuperar en un PC nuevo
+
+1. Instala el plugin y configura el mismo destino (clona el repo de copia o deja que Drive sincronice la carpeta).
+2. Clona tu proyecto y, dentro de Claude Code: `/memrotate:rotate restore`.
+
+memrotate encuentra la copia aunque el proyecto esté en otra ruta. Recupera solo lo que falta y **nunca sobrescribe** lo que ya tengas en local. Si hay varias copias posibles, te las lista para elegir con `restore <clave>`.
+
 ## Ficheros que crea
 
 ```
@@ -174,10 +235,11 @@ Claude Code borra al arrancar los transcripts con más días que `cleanupPeriodD
       ├─ MEMORY-AAAA-MM.md.gz     ← salvas mensuales
       ├─ transcripts-AAAA-MM.zip  ← si archiveTranscripts está activo
       ├─ .state.json              ← fecha de la última rotación
+      ├─ .backup.json             ← huella y fecha de la última copia de seguridad
       └─ .sessions/               ← contadores del recordatorio por sesión
 ```
 
-Si el proyecto tiene `.gitignore`, `init` le añade `.state.json` y `.sessions/`. El resto (vigente, salvas e índice) está pensado para versionarse en git.
+Si el proyecto tiene `.gitignore`, se le añaden `.state.json`, `.backup.json` y `.sessions/`. El resto (vigente, salvas e índice) está pensado para versionarse en git.
 
 ## Actualizar
 
@@ -199,6 +261,8 @@ Si el proyecto tiene `.gitignore`, `init` le añade `.state.json` y `.sessions/`
 | Windows bloquea el script | `Get-ChildItem C:\ruta\claude-memrotate-plugin -Recurse \| Unblock-File`. El plugin ya usa `-ExecutionPolicy Bypass`, así que normalmente no hace falta. |
 | El hook no parece ejecutarse | Mira la pestaña Errors de `/plugin` o arranca con `claude --debug`. |
 | Linux/macOS: `python3 (>= 3.6) or PowerShell (pwsh) is required` | Instala `python3` (`sudo apt install python3`, `sudo dnf install python3`, o `xcode-select --install` en macOS). El plugin no rompe la sesión mientras tanto, simplemente no rota. |
+| La copia a git dice `push failed` | El commit está hecho en local. Revisa que puedes hacer `git push` a mano en el clon de copia (credenciales, rama con remoto). La próxima copia lo reintenta. |
+| `restore` no encuentra la copia | Comprueba que el destino es el mismo que en el otro PC y que el clon está actualizado (`git pull`). Usa `restore <clave>` con una de las claves que lista. |
 | El recordatorio salta demasiado | `/memrotate:rotate reminder every 30` o `reminder off`. |
 | Una entrada antigua no rota | Tiene `[pin]` o no lleva fecha con el formato `[AAAA-MM-DD]` al principio de la línea. |
 

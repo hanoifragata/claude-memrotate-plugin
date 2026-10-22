@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0 - 2026-10-22
+
+- **Copia de seguridad**: copia el fichero vigente, las salvas, el índice y la Auto Memory de Claude Code a un **repo privado de GitHub** (clon local: pull, commit y push con tu git) y/o a una **carpeta** sincronizada (Google Drive, OneDrive, Dropbox). Nunca borra nada en el destino ni copia credenciales o transcripts.
+  - Automática al cerrar la sesión y, en segundo plano, al abrir la siguiente; solo si algo cambió.
+  - **Intervalo configurable**: `backup every N` / `backup daily`, o la opción de `/config`.
+  - `/memrotate:rotate backup` manual, `backup git|folder <ruta>`, `backup off`.
+  - **`restore`**: recupera la memoria en otro PC aunque el proyecto esté en otra ruta, sin sobrescribir nada local.
+  - `status` y `doctor` muestran destinos, intervalo, última copia y errores.
+- `INDEX.md` solo se reescribe cuando cambia su contenido (antes cambiaba la fecha en cada rotación y habría generado una copia diaria sin cambios reales). Ahora usa LF también en Windows.
+- Las líneas de estado que faltan en `.gitignore` se añaden solas al abrir sesión.
+
 ## 0.5.1 - 2026-10-22
 
 - Corregido: en Windows **sin** Git Bash, los hooks no recibían la entrada de Claude Code (en Windows PowerShell 5.1, `$input` llega vacío con `-Command`). Afectaba al aviso tras compactar y al recordatorio de guardado. Ahora la entrada se lee con `[Console]::In` y se pasa al script en `MEMROTATE_HOOK_INPUT`, sin tubería ni problemas de codificación. Detectado por el CI en Windows.

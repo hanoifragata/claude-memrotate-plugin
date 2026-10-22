@@ -16,6 +16,9 @@ Mismos modos, argumentos y salida que rotate.ps1:
   stop    Lo usa el hook Stop: si se ha trabajado sin tocar la memoria, pide a Claude que guarde lo aprendido
   remember  Anade una entrada con la fecha de hoy (-Text "..." o por stdin; -Pin para fijarla)
   doctor  Diagnostico de la instalacion y del proyecto
+  backup  Copia la memoria (vigente, salvas y Auto Memory) a un repo git y/o a una carpeta (Google Drive...)
+          -Quiet: solo si hubo cambios y sin salida (lo usan los hooks)
+  restore Recupera la memoria desde la copia, sin sobrescribir lo que ya existe (-From <clave> si hay varias)
 
 Las entradas marcadas con [pin] nunca rotan:  - [AAAA-MM-DD] [pin] texto   o   - [pin] texto
 Solo usa la biblioteca estandar (Python 3.6+).
@@ -23,10 +26,14 @@ Solo usa la biblioteca estandar (Python 3.6+).
 import argparse
 import datetime as dt
 import gzip
+import hashlib
 import json
 import os
 import platform
 import re
+import shutil
+import socket
+import subprocess
 import sys
 import zipfile
 
@@ -42,7 +49,8 @@ MD_START = '<!-- memrotate:start -->'
 MD_END = '<!-- memrotate:end -->'
 LEGACY_START = '<!-- memory-rotate:start -->'
 LEGACY_END = '<!-- memory-rotate:end -->'
-MODES = ['init', 'auto', 'now', 'status', 'set', 'list', 'search', 'read', 'stop', 'remember', 'doctor']
+MODES = ['init', 'auto', 'now', 'status', 'set', 'list', 'search', 'read', 'stop', 'remember', 'doctor',
+         'backup', 'restore']
 
 
 class UserError(Exception):
@@ -61,6 +69,11 @@ def parse_args(argv):
     p.add_argument('-Query', default='')
     p.add_argument('-Text', default='')
     p.add_argument('-Pin', action='store_true')
+    p.add_argument('-BackupGit', default='')
+    p.add_argument('-BackupDir', default='')
+    p.add_argument('-BackupEvery', type=int, default=-1)
+    p.add_argument('-From', default='')
+    p.add_argument('-Quiet', action='store_true')
     p.add_argument('-Month', default='')
     p.add_argument('-ProjectDir', default='')
     p.add_argument('-DataDir', default='')
@@ -192,6 +205,9 @@ def get_config(root):
         'archiveTranscripts': False,
         'saveReminder': True,
         'reminderEveryTools': 15,
+        'backupGit': '',
+        'backupDir': '',
+        'backupIntervalHours': 0,
     }
     source = 'defaults'
     # 1) Opciones globales del plugin (userConfig). En hooks llegan como variables de
@@ -199,23 +215,39 @@ def get_config(root):
     env_days = os.environ.get('CLAUDE_PLUGIN_OPTION_RETENTION_DAYS', '')
     env_tr = os.environ.get('CLAUDE_PLUGIN_OPTION_ARCHIVE_TRANSCRIPTS', '')
     env_rem = os.environ.get('CLAUDE_PLUGIN_OPTION_SAVE_REMINDER', '')
+    env_bgit = os.environ.get('CLAUDE_PLUGIN_OPTION_BACKUP_GIT', '')
+    env_bdir = os.environ.get('CLAUDE_PLUGIN_OPTION_BACKUP_DIR', '')
+    env_bint = os.environ.get('CLAUDE_PLUGIN_OPTION_BACKUP_INTERVAL_HOURS', '')
     data = plugin_data_dir()
     cache = j(data, 'options.json') if data else None
-    if (env_days or env_tr or env_rem) and cache:
+    if (env_days or env_tr or env_rem or env_bgit or env_bdir or env_bint) and cache:
         try:
             write_text(cache, json.dumps({'retention_days': env_days, 'archive_transcripts': env_tr,
-                                          'save_reminder': env_rem,
+                                          'save_reminder': env_rem, 'backup_git': env_bgit,
+                                          'backup_dir': env_bdir, 'backup_interval_hours': env_bint,
                                           'savedAt': now_str('%Y-%m-%dT%H:%M:%S')}, indent=2) + '\n')
         except OSError:
             pass
-    if (not env_days or not env_tr or not env_rem) and cache and os.path.exists(cache):
+    if cache and os.path.exists(cache) and not (env_days and env_tr and env_rem):
         try:
             c = json.loads(read_text(cache))
             env_days = env_days or str(c.get('retention_days') or '')
             env_tr = env_tr or str(c.get('archive_transcripts') or '')
             env_rem = env_rem or str(c.get('save_reminder') or '')
+            env_bgit = env_bgit or str(c.get('backup_git') or '')
+            env_bdir = env_bdir or str(c.get('backup_dir') or '')
+            env_bint = env_bint or str(c.get('backup_interval_hours') or '')
         except (OSError, ValueError):
             pass
+    if substituted(env_bgit):
+        cfg['backupGit'] = env_bgit
+    if substituted(env_bdir):
+        cfg['backupDir'] = env_bdir
+    try:
+        if env_bint and int(str(env_bint).split('.')[0]) >= 0:
+            cfg['backupIntervalHours'] = int(str(env_bint).split('.')[0])
+    except ValueError:
+        pass
     if not env_days and substituted(ARGS.DefaultDays):
         env_days = ARGS.DefaultDays
     if not env_tr and substituted(ARGS.DefaultTranscripts):
@@ -251,6 +283,10 @@ def get_config(root):
     cfg['archiveTranscripts'] = bool(cfg['archiveTranscripts'])
     cfg['saveReminder'] = bool(cfg['saveReminder'])
     cfg['reminderEveryTools'] = max(1, int(cfg['reminderEveryTools']))
+    cfg['backupIntervalHours'] = max(0, int(cfg['backupIntervalHours']))
+    for k in ('backupGit', 'backupDir'):
+        v = str(cfg[k] or '').strip()
+        cfg[k] = '' if falsy(v) else v
     cfg['source'] = source
     return cfg
 
@@ -446,10 +482,26 @@ def update_index(root, cfg):
         for z in zips:
             with zipfile.ZipFile(j(arch, z)) as zf:
                 lines.append('| %s | %d |' % (z, len(zf.namelist())))
-    write_text(j(arch, 'INDEX.md'), '\n'.join(lines) + '\n')
+    write_if_changed(j(arch, 'INDEX.md'), '\n'.join(lines) + '\n')
+
+
+def without_updated(text):
+    return re.sub(r'(?m)^Updated: .*$', '', (text or '').replace('\r\n', '\n'))
+
+
+def write_if_changed(path, text):
+    """Solo reescribe el indice si cambia algo mas que la linea 'Updated:' (evita commits de copia sin cambios)."""
+    if os.path.exists(path) and without_updated(read_text(path)) == without_updated(text):
+        return
+    write_text(path, text)
 
 
 # ---------------------------------------------------------------- init
+
+def gitignore_lines(cfg):
+    return ['%s/.state.json' % cfg['archiveDir'], '%s/.sessions/' % cfg['archiveDir'],
+            '%s/.backup.json' % cfg['archiveDir']]
+
 
 def claude_md_block(cfg):
     return '\n'.join([
@@ -509,7 +561,7 @@ def do_init(root, cfg):
     gi = j(root, '.gitignore')
     if os.path.exists(gi):
         g = read_text(gi)
-        for line in ('%s/.state.json' % cfg['archiveDir'], '%s/.sessions/' % cfg['archiveDir']):
+        for line in gitignore_lines(cfg):
             if line not in g:
                 g = g.rstrip() + '\n' + line + '\n'
         write_text(gi, g)
@@ -542,6 +594,23 @@ def transcript_warning(cfg):
     return None
 
 
+def backup_summary(root, cfg):
+    targets = ['git %s' % cfg['backupGit']] if cfg['backupGit'] else []
+    if cfg['backupDir']:
+        targets.append('folder %s' % cfg['backupDir'])
+    if not targets:
+        return 'off'
+    last = 'never'
+    sp = backup_state_path(root, cfg)
+    if os.path.exists(sp):
+        try:
+            last = json.loads(read_text(sp)).get('lastBackup') or 'never'
+        except (OSError, ValueError):
+            pass
+    every = 'every session with changes' if not cfg['backupIntervalHours'] else 'every %d h' % cfg['backupIntervalHours']
+    return '%s, %s (last %s)' % (', '.join(targets), every, last)
+
+
 def write_status(root, cfg):
     state = get_state(root, cfg)
     mem = j(root, cfg['memoryFile'])
@@ -554,7 +623,8 @@ def write_status(root, cfg):
         '  archive folder      : %s' % cfg['archiveDir'],
         '  archive transcripts : %s' % cfg['archiveTranscripts'],
         '  save reminder       : %s (every %d tool calls without saving)' % (
-            cfg['saveReminder'], cfg['reminderEveryTools']))
+            cfg['saveReminder'], cfg['reminderEveryTools']),
+        '  backup              : %s' % backup_summary(root, cfg))
     if state:
         out('  last rotation       : %s (entries moved: %s)' % (state.get('lastRunAt'), state.get('lastMoved')))
     else:
@@ -715,7 +785,7 @@ def doctor(root, cfg):
         gi = j(root, '.gitignore')
         if os.path.exists(gi):
             g = read_text(gi)
-            if ('%s/.state.json' % cfg['archiveDir']) in g and ('%s/.sessions/' % cfg['archiveDir']) in g:
+            if all(line in g for line in gitignore_lines(cfg)):
                 check('ok', '.gitignore ignores the plugin state files')
             else:
                 check('warn', '.gitignore does not ignore the plugin state files: run /memrotate:rotate init')
@@ -726,8 +796,327 @@ def doctor(root, cfg):
             check('warn', w)
         else:
             check('ok', 'transcript archiving on (cleanupPeriodDays=%d)' % cleanup_period_days())
+
+    if not cfg['backupGit'] and not cfg['backupDir']:
+        check('ok', 'backup: off (optional: /memrotate:rotate backup git <path> | backup folder <path>)')
+    else:
+        if cfg['backupGit']:
+            err = git_ready(cfg['backupGit'])
+            if err:
+                check('fail', 'backup git %s: %s' % (cfg['backupGit'], err))
+            elif not git_has_upstream(cfg['backupGit']):
+                check('warn', 'backup git %s: the branch has no remote, copies stay on this computer' % cfg['backupGit'])
+            else:
+                check('ok', 'backup git %s' % cfg['backupGit'])
+        if cfg['backupDir']:
+            if os.path.isdir(cfg['backupDir']):
+                check('ok', 'backup folder %s' % cfg['backupDir'])
+            else:
+                check('fail', 'backup folder %s: folder does not exist' % cfg['backupDir'])
+        bs = {}
+        sp = backup_state_path(root, cfg)
+        if os.path.exists(sp):
+            try:
+                bs = json.loads(read_text(sp))
+            except (OSError, ValueError):
+                bs = {}
+        if not bs.get('lastBackup'):
+            check('warn', 'no backup made yet: run /memrotate:rotate backup')
+        elif not bs.get('ok'):
+            check('warn', 'last backup (%s) had errors: run /memrotate:rotate backup to see them' % bs['lastBackup'])
+        else:
+            check('ok', 'last backup %s' % bs['lastBackup'])
     lines.append('  -> %d errors, %d warnings' % (counts['fail'], counts['warn']))
     out(*lines)
+
+
+# ---------------------------------------------------------------- copia de seguridad
+
+def project_key(root):
+    """Carpeta del proyecto en la copia: nombre + huella corta de la ruta (evita choques entre repos)."""
+    norm = root.replace('\\', '/').rstrip('/').lower()
+    name = re.sub(r'[^A-Za-z0-9._-]', '-', os.path.basename(root.replace('\\', '/').rstrip('/'))) or 'project'
+    return '%s-%s' % (name, hashlib.sha1(norm.encode('utf-8')).hexdigest()[:8])
+
+
+def auto_memory_dir(root):
+    td = transcript_dir(root)
+    if td:
+        return j(td, 'memory')
+    return j(claude_config_dir(), 'projects', re.sub(r'[^A-Za-z0-9]', '-', root), 'memory')
+
+
+def backup_files(root, cfg):
+    """Lista (origen, ruta relativa en la copia) de todo lo que se copia, ordenada."""
+    files = []
+    mem = j(root, cfg['memoryFile'])
+    if os.path.isfile(mem):
+        files.append((mem, 'memrotate/' + os.path.basename(mem)))
+    arch = j(root, cfg['archiveDir'])
+    if os.path.isdir(arch):
+        for f in sorted(os.listdir(arch)):
+            if f == 'INDEX.md' or re.match(r'^MEMORY-.*\.md\.gz$', f):
+                files.append((j(arch, f), 'memrotate/archive/' + f))
+    am = auto_memory_dir(root)
+    if os.path.isdir(am):
+        for base, dirs, names in os.walk(am):
+            dirs.sort()
+            for n in sorted(names):
+                full = j(base, n)
+                rel = os.path.relpath(full, am).replace('\\', '/')
+                files.append((full, 'auto-memory/' + rel))
+    return sorted(files, key=lambda x: x[1])
+
+
+def read_bytes(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def fingerprint(files):
+    h = hashlib.sha256()
+    for src, rel in files:
+        h.update(rel.encode('utf-8') + b'\0' + read_bytes(src) + b'\0')
+    return h.hexdigest()
+
+
+def backup_state_path(root, cfg):
+    return j(root, cfg['archiveDir'], '.backup.json')
+
+
+def copy_files(files, dest):
+    """Copia solo lo que cambia. Nunca borra nada en el destino. Devuelve cuantos ficheros escribio."""
+    changed = 0
+    for src, rel in files:
+        target = j(dest, *rel.split('/'))
+        data = read_bytes(src)
+        if os.path.isfile(target) and read_bytes(target) == data:
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        tmp = target + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, target)
+        changed += 1
+    return changed
+
+
+def write_manifest(dest, root, count):
+    write_text(j(dest, 'backup.json'), json.dumps({
+        'project': root, 'host': socket.gethostname(), 'files': count,
+        'updated': now_str('%Y-%m-%d %H:%M')}, indent=2, ensure_ascii=False) + '\n')
+
+
+def git(repo, *args, timeout=120):
+    env = dict(os.environ)
+    env['GIT_TERMINAL_PROMPT'] = '0'
+    try:
+        p = subprocess.run(['git', '-C', repo] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           env=env, timeout=timeout)
+    except FileNotFoundError:
+        return 127, 'git not found'
+    except subprocess.TimeoutExpired:
+        return 124, 'timeout'
+    return p.returncode, p.stdout.decode('utf-8', errors='replace').strip()
+
+
+def first_line(text):
+    lines = [l for l in (text or '').splitlines() if l.strip()]
+    return lines[0].strip() if lines else 'unknown error'
+
+
+def git_ready(repo):
+    if not os.path.isdir(repo):
+        return 'folder does not exist'
+    code, o = git(repo, 'rev-parse', '--is-inside-work-tree')
+    if code != 0 or o != 'true':
+        return 'not a git repository (clone your private backup repo there)'
+    return None
+
+
+def git_has_upstream(repo):
+    return git(repo, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')[0] == 0
+
+
+def backup_to_git(repo, key, files, root):
+    err = git_ready(repo)
+    if err:
+        return 'fail', err
+    upstream = git_has_upstream(repo)
+    if upstream:
+        git(repo, 'pull', '--rebase', '--autostash', '-q')
+    dest = j(repo, key)
+    if copy_files(files, dest) or not os.path.isfile(j(dest, 'backup.json')):
+        write_manifest(dest, root, len(files))
+    git(repo, 'add', '-A', '--', key)
+    if git(repo, 'diff', '--cached', '--quiet', '--', key)[0] == 0:
+        return 'ok', 'up to date'
+    code, o = git(repo, 'commit', '-q', '-m', 'memrotate: %s (%s) %s' % (key, socket.gethostname(), now_str('%Y-%m-%d %H:%M')),
+                  '--', key)
+    if code != 0:
+        return 'fail', 'commit failed: %s' % first_line(o)
+    if not upstream:
+        return 'warn', 'committed, but the branch has no remote to push to'
+    code, o = git(repo, 'push', '-q')
+    if code != 0:
+        return 'warn', 'committed, push failed: %s' % first_line(o)
+    return 'ok', 'committed and pushed'
+
+
+def backup_to_dir(folder, key, files, root):
+    if not os.path.isdir(folder):
+        return 'fail', 'folder does not exist'
+    dest = j(folder, key)
+    n = copy_files(files, dest)
+    if n or not os.path.isfile(j(dest, 'backup.json')):
+        write_manifest(dest, root, len(files))
+    return 'ok', ('%d files updated' % n) if n else 'up to date'
+
+
+def run_backup(root, cfg):
+    quiet = ARGS.Quiet
+    targets = [t for t in (('git', cfg['backupGit']), ('folder', cfg['backupDir'])) if t[1]]
+    if not targets:
+        if not quiet:
+            out('%s backup: no destination configured. Set it in /config (memrotate options) or run '
+                '/memrotate:rotate backup git <path> | backup folder <path>' % TAG)
+        return 0
+    if not os.path.exists(j(root, cfg['memoryFile'])):
+        if not quiet:
+            out('%s not initialized in this project. Run first: /memrotate:rotate init' % TAG)
+        return 0
+    files = backup_files(root, cfg)
+    fp = fingerprint(files)
+    sp = backup_state_path(root, cfg)
+    state = {}
+    if os.path.exists(sp):
+        try:
+            state = json.loads(read_text(sp))
+        except (OSError, ValueError):
+            state = {}
+    sig = '|'.join('%s=%s' % t for t in targets)
+    if quiet and state.get('fingerprint') == fp and state.get('targets') == sig and state.get('ok'):
+        return 0
+    # Intervalo de sincronizacion: en automatico, como mucho una copia cada N horas
+    if quiet and cfg['backupIntervalHours'] > 0 and state.get('ok') and state.get('targets') == sig:
+        try:
+            last = dt.datetime.strptime(str(state.get('lastBackup')), '%Y-%m-%d %H:%M')
+            if dt.datetime.now() - last < dt.timedelta(hours=cfg['backupIntervalHours']):
+                return 0
+        except ValueError:
+            pass
+    key = project_key(root)
+    lines = ['%s backup: %d files from %s -> %s' % (TAG, len(files), root, key)]
+    all_ok = True
+    for kind, path in targets:
+        try:
+            level, msg = (backup_to_git if kind == 'git' else backup_to_dir)(path, key, files, root)
+        except OSError as e:
+            level, msg = 'fail', str(e)
+        if level != 'ok':
+            all_ok = False
+        lines.append('  %-6s %s %s: %s' % ('[%s]' % level, kind, path, msg))
+    write_text(sp, json.dumps({'fingerprint': fp, 'targets': sig, 'ok': all_ok,
+                               'lastBackup': now_str('%Y-%m-%d %H:%M')}, indent=2) + '\n')
+    if quiet:
+        if not all_ok:
+            sys.stderr.write('\n'.join(lines) + '\n')
+    else:
+        out(*lines)
+    return 0
+
+
+def list_backups(base):
+    keys = []
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            mf = j(base, name, 'backup.json')
+            if os.path.isfile(mf):
+                try:
+                    keys.append((name, json.loads(read_text(mf))))
+                except (OSError, ValueError):
+                    keys.append((name, {}))
+    return keys
+
+
+def run_restore(root, cfg):
+    targets = [t for t in (('git', cfg['backupGit']), ('folder', cfg['backupDir'])) if t[1]]
+    if not targets:
+        raise UserError('no backup destination configured. Set it in /config (memrotate options) or with '
+                        '/memrotate:rotate backup git <path> | backup folder <path>')
+    key = project_key(root)
+    base_name = key.rsplit('-', 1)[0]
+    source, chosen, available = None, None, []
+    for kind, path in targets:
+        if kind == 'git' and not git_ready(path) and git_has_upstream(path):
+            git(path, 'pull', '--rebase', '--autostash', '-q')
+        backups = list_backups(path)
+        available += [(kind, path, k, m) for k, m in backups]
+        names = [k for k, _ in backups]
+        if ARGS.From:
+            if ARGS.From in names:
+                source, chosen = (kind, path), ARGS.From
+                break
+            continue
+        if key in names:
+            source, chosen = (kind, path), key
+            break
+        similar = [k for k in names if k.rsplit('-', 1)[0] == base_name]
+        if len(similar) == 1:
+            source, chosen = (kind, path), similar[0]
+            break
+    if not source:
+        lines = ['%s restore: no backup found for %s%s' % (TAG, key, (' (-From %s)' % ARGS.From) if ARGS.From else '')]
+        if available:
+            lines.append('  available backups (use /memrotate:rotate restore <key>):')
+            for kind, path, k, m in available:
+                lines.append('    %s  (%s, %s, from %s)' % (k, kind, m.get('updated', '?'), m.get('project', '?')))
+        out(*lines)
+        return 0
+
+    kind, path = source
+    src_dir = j(path, chosen)
+    meta = {}
+    try:
+        meta = json.loads(read_text(j(src_dir, 'backup.json')))
+    except (OSError, ValueError):
+        pass
+    mapping = []
+    for base, dirs, names in os.walk(src_dir):
+        dirs.sort()
+        for n in sorted(names):
+            full = j(base, n)
+            rel = os.path.relpath(full, src_dir).replace('\\', '/')
+            if rel.startswith('memrotate/archive/'):
+                mapping.append((full, j(root, cfg['archiveDir'], rel[len('memrotate/archive/'):]), rel))
+            elif rel.startswith('memrotate/'):
+                mapping.append((full, j(root, cfg['memoryFile']), rel))
+            elif rel.startswith('auto-memory/'):
+                mapping.append((full, j(auto_memory_dir(root), *rel[len('auto-memory/'):].split('/')), rel))
+    restored, kept = [], 0
+    for src, dst, rel in sorted(mapping, key=lambda x: x[2]):
+        if os.path.exists(dst):
+            if read_bytes(dst) != read_bytes(src):
+                kept += 1
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
+        restored.append(rel)
+    if os.path.exists(j(root, cfg['memoryFile'])):
+        cmd = j(root, 'CLAUDE.md')
+        if not (os.path.exists(cmd) and MD_START in read_text(cmd)):
+            do_init(root, cfg)
+            restored.append('CLAUDE.md block')
+        update_index(root, cfg)
+    lines = ['%s restore from %s %s: %s (backup of %s from %s)'
+             % (TAG, kind, path, chosen, meta.get('updated', '?'), meta.get('host', '?'))]
+    lines += ['  + %s' % r for r in restored]
+    if kept:
+        lines.append('  = %d files differ locally: kept the local version' % kept)
+    if not restored and not kept:
+        lines.append('  nothing to restore: everything is already here')
+    out(*lines)
+    return 0
 
 
 # ---------------------------------------------------------------- recordatorio de guardado (hook Stop)
@@ -833,8 +1222,14 @@ def main(argv):
                     raise UserError('Invalid -%s value: %s (use on|off)' % (name, arg))
         if ARGS.ReminderTools > 0:
             changes['reminderEveryTools'] = ARGS.ReminderTools
+        if ARGS.BackupEvery >= 0:
+            changes['backupIntervalHours'] = ARGS.BackupEvery
+        for arg, key in ((ARGS.BackupGit, 'backupGit'), (ARGS.BackupDir, 'backupDir')):
+            if arg:
+                changes[key] = 'off' if falsy(arg) else os.path.abspath(os.path.expanduser(arg))
         if not changes:
-            raise UserError('Nothing to change. Use -Days N, -Transcripts on|off, -Reminder on|off and/or -ReminderTools N.')
+            raise UserError('Nothing to change. Use -Days N, -Transcripts on|off, -Reminder on|off, -ReminderTools N, '
+                            '-BackupGit <path|off>, -BackupDir <path|off> and/or -BackupEvery <hours>.')
         save_project_config(root, changes)
         cfg = get_config(root)
         if os.path.exists(j(root, cfg['memoryFile'])):
@@ -854,6 +1249,13 @@ def main(argv):
             cmd = j(root, 'CLAUDE.md')
             if os.path.exists(cmd) and LEGACY_START in read_text(cmd):
                 do_init(root, cfg)
+            # Anade al .gitignore las lineas de estado que falten (versiones nuevas anaden ficheros)
+            gi = j(root, '.gitignore')
+            if os.path.exists(gi):
+                g = read_text(gi)
+                missing = [l for l in gitignore_lines(cfg) if l not in g]
+                if missing:
+                    write_text(gi, g.rstrip() + '\n' + '\n'.join(missing) + '\n')
             state = get_state(root, cfg)
             result = {'moved': 0, 'months': [], 'transcripts': 0}
             if mode == 'now' or not state or state.get('lastRun') != today().isoformat():
@@ -894,6 +1296,16 @@ def main(argv):
 
     elif mode == 'doctor':
         doctor(root, cfg)
+
+    elif mode == 'backup':
+        try:
+            return run_backup(root, cfg)
+        except Exception as e:  # desde los hooks nunca rompe la sesion
+            sys.stderr.write('%s backup error: %s\n' % (TAG, e))
+            return 0 if ARGS.Quiet else 1
+
+    elif mode == 'restore':
+        return run_restore(root, cfg)
 
     elif mode == 'stop':
         # Nunca bloquear ni romper el cierre de un turno por un fallo del plugin
